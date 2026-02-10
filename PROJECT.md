@@ -37,11 +37,13 @@ The Python output must reproduce the spreadsheet’s computed behavior as closel
 
 1. **Function support strategy**
    - Maintain a library of supported Excel functions.
+   - No mandatory predefined function list; implement coverage based on workbook needs.
    - If a workbook requires a function not yet in the library, use AI to generate a Python implementation candidate.
    - Any AI-generated function implementation must pass tests before acceptance.
 
 2. **Expected outputs source**
    - Expected outputs come only from the workbook being translated.
+   - Trust workbook Excel-computed values as the baseline source of truth.
    - Tests should validate **every dynamically computed cell** in that workbook.
 
 3. **Numeric tolerance**
@@ -131,7 +133,7 @@ Avoid sending entire sheets when summaries are sufficient.
 
 ### Configurable AI settings
 Expose settings for:
-- provider (`openai` / `anthropic`)
+- provider (`openai` / `anthropic`) with support for both from the start
 - model names per stage (e.g., planner vs refactor)
 - temperature
 - max tokens
@@ -170,7 +172,7 @@ Each workbook outputs one Python file (example: `pricing_model.py`) containing:
 - calculation logic
 - helper/runtime utilities used by that workbook
 - expected outputs (from workbook)
-- test routines
+- separate test routines (kept distinct from main calculation logic)
 - main test runner entrypoint
 
 No strict layout standard is required across all generated files, but generated files must remain understandable and testable.
@@ -188,8 +190,10 @@ Tests are first-class and must run on every modification.
 
 2. **Shock tests**
    - Apply small input perturbations.
-   - Validate output response consistency against workbook-derived shocked expectations (when available) or approved reference snapshots.
+   - Generate shocked expected outputs by applying the same perturbations in Excel and capturing workbook results as reference snapshots.
+   - Validate output response consistency against those workbook-derived shocked expectations.
    - Compare both absolute values and deltas where relevant.
+   - If live Excel automation is unavailable, use committed pre-generated workbook snapshots.
 
 3. **Determinism tests**
    - Fixed seed/time/context should produce repeatable outputs.
@@ -199,7 +203,7 @@ Tests are first-class and must run on every modification.
 
 ## Test execution policy
 - Tests run locally on generation/refactor steps.
-- Tests run in CI on every commit/push.
+- Tests run in CI on every push.
 - Any failure blocks acceptance.
 
 ---
@@ -243,6 +247,7 @@ Required:
 
 Optional:
 - `numpy` (if helpful for array operations)
+- `pywin32` (or equivalent) for automated Excel recalculation/snapshot generation on Windows
 - file watcher for auto-testing during development
 
 ---
@@ -304,6 +309,7 @@ When working on this project:
 ## Initial milestone plan
 
 ### Milestone 1
+- Baseline workbook: `excel_model.xlsx`.
 - Parse workbook + formulas + dependencies.
 - Generate literal single-script Python.
 - Implement full-cell parity test against workbook outputs.
