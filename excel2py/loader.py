@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import load_workbook
-from openpyxl.utils.cell import range_boundaries
+from openpyxl.utils.cell import get_column_letter
 
 DEFAULT_WORKBOOK = Path("excel_model.xlsx")
 DEFAULT_ARTIFACTS_ROOT = Path("artifacts")
@@ -31,14 +31,23 @@ def _read_workbook_metadata(
     used_named_ranges: set[str] | None = None,
 ) -> dict[str, object]:
     workbook_path = Path(excel_file)
-    workbook = load_workbook(workbook_path, data_only=False, read_only=True)
+    workbook_formulas = load_workbook(workbook_path, data_only=False, read_only=False)
+    workbook_values = load_workbook(workbook_path, data_only=True, read_only=False)
     try:
-        sheet_dimensions = {
-            sheet.title: sheet.calculate_dimension() for sheet in workbook.worksheets
-        }
+        sheet_dimensions = {}
+        for sheet_name in workbook_formulas.sheetnames:
+            sheet_formulas = workbook_formulas[sheet_name]
+            sheet_values = workbook_values[sheet_name]
+            min_col, min_row, max_col, max_row = _sheet_iteration_bounds(
+                sheet_formulas,
+                sheet_values,
+            )
+            sheet_dimensions[sheet_name] = (
+                f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+            )
 
         named_ranges = []
-        for range_name, defined_name in workbook.defined_names.items():
+        for range_name, defined_name in workbook_formulas.defined_names.items():
             if used_named_ranges is not None and range_name not in used_named_ranges:
                 continue
 
@@ -61,12 +70,13 @@ def _read_workbook_metadata(
 
         return {
             "workbook_path": str(workbook_path.resolve()),
-            "sheet_names": list(workbook.sheetnames),
+            "sheet_names": list(workbook_formulas.sheetnames),
             "sheet_dimensions": sheet_dimensions,
             "named_ranges": named_ranges,
         }
     finally:
-        workbook.close()
+        workbook_formulas.close()
+        workbook_values.close()
 
 
 def _find_defined_names_in_text(
@@ -109,6 +119,44 @@ def _artifact_paths(workbook_path: Path, artifacts_root: str | Path) -> dict[str
     }
 
 
+def _sheet_iteration_bounds(
+    sheet_formulas,
+    sheet_values,
+) -> tuple[int, int, int, int]:
+    min_row = None
+    min_col = None
+    max_row = 0
+    max_col = 0
+
+    coordinates = set(sheet_formulas._cells.keys()) | set(sheet_values._cells.keys())
+    for row, col in coordinates:
+        formula_cell = sheet_formulas._cells.get((row, col))
+        value_cell = sheet_values._cells.get((row, col))
+
+        has_formula = (
+            formula_cell is not None
+            and formula_cell.data_type == "f"
+            and formula_cell.value is not None
+        )
+        has_value = value_cell is not None and value_cell.value is not None
+        if not has_formula and not has_value:
+            continue
+
+        if min_row is None or row < min_row:
+            min_row = row
+        if min_col is None or col < min_col:
+            min_col = col
+        if row > max_row:
+            max_row = row
+        if col > max_col:
+            max_col = col
+
+    if min_row is None or min_col is None:
+        return 1, 1, 1, 1
+
+    return min_col, min_row, max_col, max_row
+
+
 def export_workbook_artifacts(
     excel_file: str | Path = DEFAULT_WORKBOOK,
     artifacts_root: str | Path = DEFAULT_ARTIFACTS_ROOT,
@@ -131,10 +179,10 @@ def export_workbook_artifacts(
             for sheet_idx, sheet_name in enumerate(workbook_formulas.sheetnames):
                 sheet_formulas = workbook_formulas[sheet_name]
                 sheet_values = workbook_values[sheet_name]
-                min_col, min_row, max_col, max_row = range_boundaries(
-                    sheet_formulas.calculate_dimension()
+                min_col, min_row, max_col, max_row = _sheet_iteration_bounds(
+                    sheet_formulas,
+                    sheet_values,
                 )
-
                 for row in range(min_row, max_row + 1):
                     for col in range(min_col, max_col + 1):
                         formula_cell = sheet_formulas.cell(row=row, column=col)
