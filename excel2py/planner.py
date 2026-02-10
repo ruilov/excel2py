@@ -184,6 +184,9 @@ def export_formula_dependencies(
 
     dependency_record_count = 0
     dependency_edge_count = 0
+    parse_error_count = 0
+    parse_error_samples: list[dict[str, object]] = []
+    max_error_samples = 20
     with paths["formulas_path"].open("r", encoding="utf-8") as source:
         with paths["dependencies_path"].open("w", encoding="utf-8", newline="\n") as target:
             for line in source:
@@ -192,7 +195,7 @@ def export_formula_dependencies(
                 if formula is None:
                     continue
 
-                dependencies, _parse_error = extract_dependencies_from_formula(
+                dependencies, parse_error = extract_dependencies_from_formula(
                     formula=formula,
                     current_sheet_idx=record[sheet_idx_idx],
                     sheet_idx_by_name=sheet_idx_by_name,
@@ -200,6 +203,17 @@ def export_formula_dependencies(
                 )
                 if dependencies is None:
                     dependencies = []
+                if parse_error is not None:
+                    parse_error_count += 1
+                    if len(parse_error_samples) < max_error_samples:
+                        parse_error_samples.append(
+                            {
+                                "sheet_idx": record[sheet_idx_idx],
+                                "addr": record[addr_idx],
+                                "formula": formula,
+                                "error": parse_error,
+                            }
+                        )
 
                 out_record = [
                     record[sheet_idx_idx],
@@ -222,6 +236,8 @@ def export_formula_dependencies(
             "['name', range_name]",
             "['ext', external_ref]",
         ],
+        "parse_error_count": parse_error_count,
+        "parse_error_samples": parse_error_samples,
     }
 
 
@@ -329,6 +345,7 @@ def _resolve_ref_to_formula_nodes(
 def build_calc_order(
     excel_file: str | Path = DEFAULT_WORKBOOK,
     artifacts_root: str | Path = DEFAULT_ARTIFACTS_ROOT,
+    parse_diagnostics: dict[str, object] | None = None,
 ) -> dict[str, object]:
     workbook_path = Path(excel_file)
     paths = _planner_paths(workbook_path, artifacts_root)
@@ -406,6 +423,10 @@ def build_calc_order(
         "calc_order": calc_order,
         "has_cycles": len(cycles) > 0,
         "cycles": cycles,
+        "parse_diagnostics": {
+            "parse_error_count": 0 if parse_diagnostics is None else parse_diagnostics.get("parse_error_count", 0),
+            "parse_error_samples": [] if parse_diagnostics is None else parse_diagnostics.get("parse_error_samples", []),
+        },
         "stats": {
             "formula_node_count": graph.number_of_nodes(),
             "formula_edge_count": graph.number_of_edges(),
@@ -415,6 +436,7 @@ def build_calc_order(
             "input_ref_count": input_ref_count,
             "unresolved_named_range_count": unresolved_named_range_count,
             "unresolved_external_ref_count": unresolved_external_ref_count,
+            "parse_error_count": 0 if parse_diagnostics is None else parse_diagnostics.get("parse_error_count", 0),
         },
     }
     paths["calc_order_path"].write_text(
@@ -434,6 +456,7 @@ def build_calc_order(
         "input_ref_count": input_ref_count,
         "unresolved_named_range_count": unresolved_named_range_count,
         "unresolved_external_ref_count": unresolved_external_ref_count,
+        "parse_error_count": 0 if parse_diagnostics is None else parse_diagnostics.get("parse_error_count", 0),
     }
 
 
@@ -465,6 +488,7 @@ def main() -> None:
     order_result = build_calc_order(
         excel_file=args.excel_file,
         artifacts_root=args.artifacts_root,
+        parse_diagnostics=dep_result,
     )
 
     print(f"Workbook: {result['workbook_path']}")
@@ -475,6 +499,7 @@ def main() -> None:
     print(f"Dependencies JSONL: {dep_result['dependencies_path']}")
     print(f"Dependency records: {dep_result['dependency_record_count']}")
     print(f"Dependency edges: {dep_result['dependency_edge_count']}")
+    print(f"Parse errors: {dep_result['parse_error_count']}")
     print(f"Calc Order JSON: {order_result['calc_order_path']}")
     print(f"Formula nodes: {order_result['formula_node_count']}")
     print(f"Graph edges: {order_result['formula_edge_count']}")
