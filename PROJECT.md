@@ -4,7 +4,7 @@
 Excel2Py AI Translator
 
 ## Mission
-Translate an Excel workbook into a **single self-contained Python script** that includes:
+Translate an Excel workbook into a **single self-contained Python script** for model logic, with a separate automated test suite that includes:
 1. inputs
 2. calculations
 3. tests
@@ -164,16 +164,17 @@ Cache AI outputs keyed by deterministic payload hash so unchanged clusters do no
 
 ## Feature support matrix (v1 stance)
 
-### Supported from start
+### Implemented now
 - Circular references (iterative calculation with parameters)
-- Dynamic addressing/reference-by-text (`OFFSET`, `INDIRECT`)
-- Dynamic arrays and spill behavior
-- Structured references (Excel tables)
-- Named ranges (including dynamic names as feasible)
-- Core error propagation
-- Workbook date systems (pragmatic handling)
+- Core dependency extraction and deterministic literal generation
+- Runtime helper coverage required by current workbook
+- Workbook date handling required by current workbook (`EOMONTH`)
 
-### Not supported initially
+### Planned / not yet implemented
+- Dynamic addressing/reference-by-text (`OFFSET`, `INDIRECT`) full support
+- Dynamic arrays and spill behavior full support
+- Structured references (Excel tables)
+- Full named range runtime resolution
 - VBA/macros/UDF runtimes
 - Power Query/Data Model/OLAP semantics
 - Live external link dependency execution (snapshot/frozen values are acceptable)
@@ -187,10 +188,9 @@ Each workbook outputs one Python file (example: `pricing_model.py`) containing:
 - input definitions/defaults
 - calculation logic
 - helper/runtime utilities used by that workbook
-- expected outputs (from workbook)
-- separate test routines (kept distinct from main calculation logic)
-- main test runner entrypoint
+- lineage comments/mapping back to workbook cells/ranges
 
+Tests are separate from main calculation logic and live under `tests/`.
 No strict layout standard is required across all generated files, but generated files must remain understandable and testable.
 
 ---
@@ -213,6 +213,33 @@ Rules:
 - Use `sheet_idx` as 0-based index into `workbook_meta.json -> sheet_names`.
 - Publish record field order in metadata/manifest to avoid ambiguity.
 - Keep only needed named ranges in `workbook_meta.json`.
+- Compute sheet dimensions from actual non-empty formula/value cells (not inflated Excel used-range metadata).
+
+---
+
+## Current implementation status
+
+Implemented:
+
+- Deterministic pipeline: `loader.py -> planner.py -> translator.py`.
+- Parser strategy: LALR-first parsing with Earley fallback and parse caching.
+- Dependency extraction and calculation ordering artifacts:
+  - `derived/formulas.jsonl`
+  - `derived/dependencies.jsonl`
+  - `derived/calc_order.json`
+- Deterministic literal code generation with explicit per-cell functions and cycle iteration parameters.
+- Runtime helper coverage for current workbook formulas, including `ABS`, `CEILING`, `CHOOSE`, `EOMONTH`, `IRR`, `SUMIF`, `SUMIFS`.
+- Excel-like arithmetic coercion in generated expressions for blanks/numeric ops.
+- Automated tests implemented and passing:
+  - `tests/test_parity.py`
+  - `tests/test_circular.py`
+  - `tests/test_determinism.py`
+
+Planned / not yet implemented:
+
+- Shock tests workflow and committed workbook-derived shock snapshots.
+- CI pipeline wiring to run tests on push.
+- AI refactor stage (`refactor_ai.py`) with acceptance gating.
 
 ---
 
@@ -225,22 +252,21 @@ Tests are first-class and must run on every modification.
 1. **Full-cell parity test**
    - Validate every dynamic/formula cell against workbook-derived expected outputs.
 
-2. **Shock tests**
-   - Apply small input perturbations.
-   - Generate shocked expected outputs by applying the same perturbations in Excel and capturing workbook results as reference snapshots.
-   - Validate output response consistency against those workbook-derived shocked expectations.
-   - Compare both absolute values and deltas where relevant.
-   - If live Excel automation is unavailable, use committed pre-generated workbook snapshots.
-
-3. **Determinism tests**
+2. **Determinism tests**
    - Fixed seed/time/context should produce repeatable outputs.
 
-4. **Circular convergence tests**
+3. **Circular convergence tests**
    - Validate convergence behavior and parameterized iteration settings.
+
+Deferred:
+
+- **Shock tests**
+  - Keep as planned snapshot-based functionality.
+  - Not required for current acceptance gate until re-enabled.
 
 ## Test execution policy
 - Tests run locally on generation/refactor steps.
-- Tests run in CI on every push.
+- CI-on-push is planned but not yet wired.
 - Any failure blocks acceptance.
 - Early loader/extractor utilities do not require dedicated unit tests at this stage.
 
@@ -353,13 +379,15 @@ When working on this project:
 - Build compact intermediate artifact export (`manifest.json`, `workbook_meta.json`, `cells.jsonl`) under `artifacts/<workbook_stem>/raw/`.
 - Generate literal single-script Python.
 - Implement full-cell parity test against workbook outputs.
+- Status: complete.
 
 ### Milestone 2
 - Add circular iteration support with parameters.
-- Add dynamic refs (`OFFSET`/`INDIRECT`) and spill support baseline.
-- Add shock tests.
+- Add determinism and circular convergence tests.
+- Status: deterministic + circular + determinism complete; shock tests deferred; dynamic refs/spill still pending.
 
 ### Milestone 3
+- Add CI workflow to run active tests on push.
 - Add AI pattern grouping + function extraction.
 - Add AI refactor pass using formatting/layout cues.
 - Add token cache and configurable model/prompt settings.
@@ -375,6 +403,6 @@ When working on this project:
 
 A change is done when:
 - code is merged and runnable,
-- required tests pass locally and in CI,
-- no regression in parity/shock/determinism/circular suites,
+- required tests pass locally (and in CI once CI is configured),
+- no regression in active parity/determinism/circular suites,
 - lineage mapping remains intact for affected logic.
