@@ -88,7 +88,23 @@ The Python output must reproduce the spreadsheet’s computed behavior as closel
     - Performance is not a primary concern right now.
 
 15. **Traceability**
-    - Preserve easy mapping from generated code back to workbook origins.
+   - Preserve easy mapping from generated code back to workbook origins.
+
+16. **Intermediate artifact storage**
+   - For each workbook, write intermediate extraction outputs under `artifacts/<workbook_stem>/raw/`.
+
+17. **Cell export compactness**
+   - Store cells in compact JSONL list form instead of verbose dict form.
+   - Record schema via metadata to keep decoding explicit.
+
+18. **Cell export filtering**
+   - Do not export cells that have neither formula nor value.
+
+19. **Named range filtering**
+   - In workbook metadata, keep only named ranges that are referenced by used formulas/values.
+
+20. **Loader defensiveness**
+   - Keep loader/export path handling simple and non-defensive where practical; allow file errors to surface naturally.
 
 ---
 
@@ -179,6 +195,27 @@ No strict layout standard is required across all generated files, but generated 
 
 ---
 
+## Intermediate extraction artifact contract (current)
+
+For each workbook, write:
+
+- `artifacts/<workbook_stem>/raw/manifest.json`
+- `artifacts/<workbook_stem>/raw/workbook_meta.json`
+- `artifacts/<workbook_stem>/raw/cells.jsonl`
+
+`cells.jsonl` stores one compact record per exported cell:
+
+- `[sheet_idx, addr, data_type, formula, value]`
+
+Rules:
+
+- Export only cells with a formula or a non-empty value.
+- Use `sheet_idx` as 0-based index into `workbook_meta.json -> sheet_names`.
+- Publish record field order in metadata/manifest to avoid ambiguity.
+- Keep only needed named ranges in `workbook_meta.json`.
+
+---
+
 ## Testing requirements (mandatory)
 
 Tests are first-class and must run on every modification.
@@ -205,6 +242,7 @@ Tests are first-class and must run on every modification.
 - Tests run locally on generation/refactor steps.
 - Tests run in CI on every push.
 - Any failure blocks acceptance.
+- Early loader/extractor utilities do not require dedicated unit tests at this stage.
 
 ---
 
@@ -260,6 +298,7 @@ Generated code must preserve a mapping from Python logic back to workbook proven
 - cluster/group id (if applicable)
 
 Traceability can be implemented via lightweight comments, sidecar metadata, or internal mapping structures.
+Current preference: inline comments in generated Python where practical.
 
 ---
 
@@ -311,6 +350,7 @@ When working on this project:
 ### Milestone 1
 - Baseline workbook: `excel_model.xlsx`.
 - Parse workbook + formulas + dependencies.
+- Build compact intermediate artifact export (`manifest.json`, `workbook_meta.json`, `cells.jsonl`) under `artifacts/<workbook_stem>/raw/`.
 - Generate literal single-script Python.
 - Implement full-cell parity test against workbook outputs.
 
