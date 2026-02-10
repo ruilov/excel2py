@@ -80,13 +80,9 @@ def export_formula_dependencies(
     parse_error_count = 0
     parse_error_samples: list[dict[str, object]] = []
     max_error_samples = 20
-    count = 0
     with paths["formulas_path"].open("r", encoding="utf-8") as source:
         with paths["dependencies_path"].open("w", encoding="utf-8", newline="\n") as target:
             for line in source:
-                count += 1
-                if count % 100 == 0:
-                    print(f"Processed {count} formula rows...")
                 record = json.loads(line)
                 formula = record[formula_idx]
                 if formula is None:

@@ -237,7 +237,8 @@ class _FormulaLowerer:
             "POW_OP",
             "UNARY_OP",
             "PERCENT_OP",
-            "ARG_SEP",
+            "COMMA",
+            "SEMI",
         }:
             return token.value
 
@@ -296,7 +297,7 @@ class _FormulaLowerer:
     def _lower_arg_list(self, arg_list: Tree) -> list[str]:
         args: list[str] = []
         for child in arg_list.children:
-            if isinstance(child, Token) and child.type == "ARG_SEP":
+            if isinstance(child, Token) and child.type in {"COMMA", "SEMI"}:
                 continue
             args.append(self.lower(child))
         return args

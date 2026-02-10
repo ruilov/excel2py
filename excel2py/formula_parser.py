@@ -1,5 +1,6 @@
 import lark
 import re
+from functools import lru_cache
 
 
 QUALIFIED_REF_SPLIT = re.compile(r"^(?P<sheet>.+)!(?P<addr>.+)$")
@@ -39,12 +40,12 @@ FORMULA_GRAMMAR = r"""
 
 function_call: NAME "(" [arg_list] ")"
 
-arg_list: arg (ARG_SEP arg)*
+arg_list: arg ((COMMA | SEMI) arg)*
 ?arg: expr?
 
 array_literal: "{" [array_rows] "}"
-array_rows: array_row (";" array_row)*
-array_row: expr? ("," expr?)*
+array_rows: array_row (SEMI array_row)*
+array_row: expr? (COMMA expr?)*
 
 reference: REF_QUALIFIED
          | REF_CELL_RANGE
@@ -59,7 +60,8 @@ MUL_OP: "*" | "/"
 POW_OP: "^"
 UNARY_OP: "+" | "-"
 PERCENT_OP: "%"
-ARG_SEP: "," | ";"
+COMMA: ","
+SEMI: ";"
 
 BOOL.2: "TRUE"i | "FALSE"i
 ERROR.2: /#(?:NULL!|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|N\/A|CALC!|SPILL!|FIELD!|GETTING_DATA|CONNECT!|BLOCKED!|UNKNOWN!|BUSY!)/
@@ -79,7 +81,14 @@ STRING: /"([^"]|"")*"/
 """
 
 
-_PARSER = lark.Lark(
+_LALR_PARSER = lark.Lark(
+    FORMULA_GRAMMAR,
+    start="formula",
+    parser="lalr",
+    lexer="contextual",
+)
+
+_EARLEY_PARSER = lark.Lark(
     FORMULA_GRAMMAR,
     start="formula",
     parser="earley",
@@ -87,8 +96,13 @@ _PARSER = lark.Lark(
 )
 
 
+@lru_cache(maxsize=20000)
 def parse_formula(formula: str) -> lark.Tree:
-    return _PARSER.parse(formula.strip())
+    text = formula.strip()
+    try:
+        return _LALR_PARSER.parse(text)
+    except lark.exceptions.LarkError:
+        return _EARLEY_PARSER.parse(text)
 
 
 def try_parse_formula(formula: str) -> tuple[lark.Tree | None, str | None]:
