@@ -9,16 +9,6 @@ from openpyxl.utils import cell as xl_cell
 from excel2py.formula_parser import extract_dependencies_from_formula
 from excel2py.loader import *
 
-CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
-RANGE_REF = rf"{CELL_REF}:{CELL_REF}"
-COL_RANGE_REF = r"\$?[A-Za-z]{1,3}:\$?[A-Za-z]{1,3}"
-ROW_RANGE_REF = r"\$?\d+:\$?\d+"
-ADDR_REF = rf"(?:{RANGE_REF}|{CELL_REF}|{COL_RANGE_REF}|{ROW_RANGE_REF})"
-SHEET_TOKEN = r"(?:'[^']+'|[A-Za-z0-9_ .\[\]-]+)"
-QUALIFIED_REF_PATTERN = re.compile(rf"(?P<sheet>{SHEET_TOKEN})!(?P<addr>{ADDR_REF})")
-UNQUALIFIED_REF_PATTERN = re.compile(rf"(?<![A-Za-z0-9_\.])(?P<addr>{ADDR_REF})(?![A-Za-z0-9_])")
-NAME_TOKEN_PATTERN = re.compile(r"[A-Za-z_\\][A-Za-z0-9_.\\]*")
-
 
 def _planner_paths(workbook_path: Path, artifacts_root: str | Path) -> dict[str, Path]:
     workbook_key = workbook_path.stem
@@ -65,103 +55,6 @@ def export_formula_rows(
         "formulas_path": str(paths["formulas_path"].resolve()),
         "formula_count": formula_count,
     }
-
-
-def _strip_quoted_strings(text: str) -> str:
-    chars = list(text)
-    in_quote = False
-    for idx, char in enumerate(chars):
-        if char == '"':
-            in_quote = not in_quote
-            chars[idx] = " "
-            continue
-        if in_quote:
-            chars[idx] = " "
-    return "".join(chars)
-
-
-def _normalize_sheet_token(sheet_token: str) -> str:
-    token = sheet_token.strip()
-    if token.startswith("'") and token.endswith("'") and len(token) >= 2:
-        token = token[1:-1].replace("''", "'")
-    return token
-
-
-def _sheet_idx_from_token(sheet_token: str, sheet_idx_by_name: dict[str, int]) -> int | None:
-    normalized = _normalize_sheet_token(sheet_token)
-    if normalized in sheet_idx_by_name:
-        return sheet_idx_by_name[normalized]
-
-    no_book_prefix = re.sub(r"^\[[^\]]+\]", "", normalized)
-    if no_book_prefix in sheet_idx_by_name:
-        return sheet_idx_by_name[no_book_prefix]
-
-    return None
-
-
-def _extract_dependencies(
-    formula: str,
-    current_sheet_idx: int,
-    sheet_idx_by_name: dict[str, int],
-    defined_name_by_upper: dict[str, str],
-) -> list[list[object]]:
-    formula_body = formula[1:] if formula.startswith("=") else formula
-    sanitized = _strip_quoted_strings(formula_body)
-    chars = list(sanitized)
-
-    dependencies: list[list[object]] = []
-    seen: set[tuple[object, ...]] = set()
-
-    def add_ref(sheet_idx: int, addr: str) -> None:
-        key = ("ref", sheet_idx, addr)
-        if key in seen:
-            return
-        seen.add(key)
-        dependencies.append([sheet_idx, addr])
-
-    def add_external_ref(ref: str) -> None:
-        key = ("ext", ref)
-        if key in seen:
-            return
-        seen.add(key)
-        dependencies.append(["ext", ref])
-
-    def add_named_range(name: str) -> None:
-        key = ("name", name)
-        if key in seen:
-            return
-        seen.add(key)
-        dependencies.append(["name", name])
-
-    for match in QUALIFIED_REF_PATTERN.finditer(sanitized):
-        start, end = match.span()
-        for idx in range(start, end):
-            chars[idx] = " "
-
-        target_idx = _sheet_idx_from_token(match.group("sheet"), sheet_idx_by_name)
-        addr = match.group("addr")
-        if target_idx is None:
-            add_external_ref(f"{_normalize_sheet_token(match.group('sheet'))}!{addr}")
-        else:
-            add_ref(target_idx, addr)
-
-    remaining = "".join(chars)
-    remaining_chars = list(remaining)
-
-    for match in UNQUALIFIED_REF_PATTERN.finditer(remaining):
-        start, end = match.span()
-        for idx in range(start, end):
-            remaining_chars[idx] = " "
-        add_ref(current_sheet_idx, match.group("addr"))
-
-    named_range_scan_text = "".join(remaining_chars)
-    for token in NAME_TOKEN_PATTERN.findall(named_range_scan_text):
-        name = defined_name_by_upper.get(token.upper())
-        if name is not None:
-            add_named_range(name)
-
-    return dependencies
-
 
 def export_formula_dependencies(
     excel_file: str | Path = DEFAULT_WORKBOOK,
