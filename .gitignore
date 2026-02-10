@@ -1,2 +1,15 @@
+launch.json
 excel_model.xlsx
 excel_model - Copy.xlsx
+~$excel_model - Copy.xlsx
+__pycache__/
+*.pyc
+.pytest_tmp/
+.pytest_cache/
+.pytest_cache_local/
+pytest-cache-files-*/
+_tmp_*.xlsx
+artifacts/
+artifacts_*/
+smoke_*.xlsx
+tests/.pytest_tmp_run/
