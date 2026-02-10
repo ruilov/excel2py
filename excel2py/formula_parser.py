@@ -11,20 +11,20 @@ FORMULA_GRAMMAR = r"""
 
 ?expr: concat_expr
 
-?concat_expr: comparison_expr ("&" comparison_expr)*
+?concat_expr: comparison_expr (CONCAT_OP comparison_expr)*
 
 ?comparison_expr: additive_expr (COMPOP additive_expr)*
 
-?additive_expr: multiplicative_expr (("+" | "-") multiplicative_expr)*
+?additive_expr: multiplicative_expr (ADD_OP multiplicative_expr)*
 
-?multiplicative_expr: power_expr (("*" | "/") power_expr)*
+?multiplicative_expr: power_expr (MUL_OP power_expr)*
 
-?power_expr: unary_expr ("^" unary_expr)*
+?power_expr: unary_expr (POW_OP unary_expr)*
 
-?unary_expr: ("+" | "-") unary_expr
+?unary_expr: UNARY_OP unary_expr
            | postfix_expr
 
-?postfix_expr: primary "%"
+?postfix_expr: primary PERCENT_OP
              | primary
 
 ?primary: function_call
@@ -53,6 +53,12 @@ reference: REF_QUALIFIED
          | REF_CELL
 
 COMPOP: "<>" | "<=" | ">=" | "<" | ">" | "="
+CONCAT_OP: "&"
+ADD_OP: "+" | "-"
+MUL_OP: "*" | "/"
+POW_OP: "^"
+UNARY_OP: "+" | "-"
+PERCENT_OP: "%"
 ARG_SEP: "," | ";"
 
 BOOL.2: "TRUE"i | "FALSE"i

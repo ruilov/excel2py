@@ -3,7 +3,14 @@ import json
 import re
 from pathlib import Path
 
+from lark import Token
+from lark import Tree
+
+from excel2py.formula_parser import parse_formula
 from excel2py.loader import *
+
+
+QUALIFIED_REF_SPLIT = re.compile(r"^(?P<sheet>.+)!(?P<addr>.+)$")
 
 
 def _translator_paths(workbook_path: Path, artifacts_root: str | Path) -> dict[str, Path]:
@@ -54,25 +61,350 @@ def _load_jsonl(path: Path) -> list[object]:
     return rows
 
 
+def _normalize_sheet_token(sheet_token: str) -> str:
+    token = sheet_token.strip()
+    if token.startswith("'") and token.endswith("'") and len(token) >= 2:
+        token = token[1:-1].replace("''", "'")
+    return token
+
+
+def _sheet_idx_from_token(sheet_token: str, sheet_idx_by_name: dict[str, int]) -> int | None:
+    normalized = _normalize_sheet_token(sheet_token)
+    if normalized in sheet_idx_by_name:
+        return sheet_idx_by_name[normalized]
+
+    without_book_prefix = re.sub(r"^\[[^\]]+\]", "", normalized)
+    if without_book_prefix in sheet_idx_by_name:
+        return sheet_idx_by_name[without_book_prefix]
+
+    return None
+
+
+def _split_qualified_ref(ref_text: str) -> tuple[str | None, str | None]:
+    match = QUALIFIED_REF_SPLIT.match(ref_text)
+    if match is None:
+        return None, None
+    return match.group("sheet"), match.group("addr")
+
+
+def _dependency_key(dependency: list[object]) -> tuple[object, ...] | None:
+    if len(dependency) == 2 and isinstance(dependency[0], int):
+        return ("ref", dependency[0], _normalize_addr(str(dependency[1])))
+    if len(dependency) == 2 and dependency[0] == "name":
+        return ("name", str(dependency[1]))
+    if len(dependency) == 2 and dependency[0] == "ext":
+        return ("ext", str(dependency[1]))
+    return None
+
+
+def _string_literal_from_excel_token(token_value: str) -> str:
+    unquoted = token_value[1:-1]
+    return repr(unquoted.replace('""', '"'))
+
+
+class _FormulaLowerer:
+    def __init__(
+        self,
+        current_sheet_idx: int,
+        sheet_idx_by_name: dict[str, int],
+        defined_name_by_upper: dict[str, str],
+        dep_arg_by_key: dict[tuple[object, ...], str],
+    ) -> None:
+        self.current_sheet_idx = current_sheet_idx
+        self.sheet_idx_by_name = sheet_idx_by_name
+        self.defined_name_by_upper = defined_name_by_upper
+        self.dep_arg_by_key = dep_arg_by_key
+        self.errors: list[str] = []
+
+    def lower(self, node: Tree | Token) -> str:
+        if isinstance(node, Token):
+            return self._lower_token(node)
+
+        data = node.data
+        if data == "reference":
+            return self._lower_reference(node)
+
+        if data == "function_call":
+            return self._lower_function_call(node)
+
+        if data == "arg":
+            if not node.children:
+                return "None"
+            return self.lower(node.children[0])
+
+        if data == "arg_list":
+            args = self._lower_arg_list(node)
+            return "[" + ", ".join(args) + "]"
+
+        if data == "concat_expr":
+            return self._lower_binary_chain(
+                node.children,
+                combine=lambda left, op, right: f"xl_concat({left}, {right})",
+            )
+
+        if data == "comparison_expr":
+            return self._lower_binary_chain(
+                node.children,
+                combine=lambda left, op, right: f"xl_compare({repr(op)}, {left}, {right})",
+            )
+
+        if data == "additive_expr":
+            return self._lower_binary_chain(
+                node.children,
+                combine=lambda left, op, right: f"({left} {op} {right})",
+            )
+
+        if data == "multiplicative_expr":
+            return self._lower_binary_chain(
+                node.children,
+                combine=lambda left, op, right: f"({left} {op} {right})",
+            )
+
+        if data == "power_expr":
+            return self._lower_binary_chain(
+                node.children,
+                combine=lambda left, op, right: f"({left} ** {right})",
+            )
+
+        if data == "unary_expr":
+            if len(node.children) == 2 and isinstance(node.children[0], Token):
+                op = node.children[0].value
+                inner = self.lower(node.children[1])
+                return f"({op}{inner})"
+            if len(node.children) == 1:
+                return self.lower(node.children[0])
+
+        if data == "postfix_expr":
+            if len(node.children) == 2:
+                value = self.lower(node.children[0])
+                return f"({value} / 100.0)"
+            if len(node.children) == 1:
+                return self.lower(node.children[0])
+
+        if data == "array_literal":
+            return self._lower_array_literal(node)
+
+        if data == "array_rows":
+            rows = [self._lower_array_row(child) for child in node.children if isinstance(child, Tree)]
+            return "[" + ", ".join(rows) + "]"
+
+        if data == "array_row":
+            return self._lower_array_row(node)
+
+        if len(node.children) == 1:
+            return self.lower(node.children[0])
+
+        self.errors.append(f"Unsupported AST node: {data}")
+        return "None"
+
+    def _lower_token(self, token: Token) -> str:
+        if token.type == "NUMBER":
+            return token.value
+
+        if token.type == "STRING":
+            return _string_literal_from_excel_token(token.value)
+
+        if token.type == "BOOL":
+            return "True" if token.value.upper() == "TRUE" else "False"
+
+        if token.type == "ERROR":
+            return f"xl_error({repr(token.value)})"
+
+        if token.type == "NAME":
+            range_name = self.defined_name_by_upper.get(token.value.upper())
+            if range_name is None:
+                self.errors.append(f"Unresolved name token: {token.value}")
+                return "None"
+
+            key = ("name", range_name)
+            arg_name = self.dep_arg_by_key.get(key)
+            if arg_name is None:
+                self.errors.append(f"Named range missing from dependency list: {range_name}")
+                return "None"
+            return arg_name
+
+        if token.type in {
+            "COMPOP",
+            "CONCAT_OP",
+            "ADD_OP",
+            "MUL_OP",
+            "POW_OP",
+            "UNARY_OP",
+            "PERCENT_OP",
+            "ARG_SEP",
+        }:
+            return token.value
+
+        self.errors.append(f"Unsupported token type: {token.type}")
+        return "None"
+
+    def _lower_reference(self, node: Tree) -> str:
+        if not node.children or not isinstance(node.children[0], Token):
+            self.errors.append("Malformed reference node")
+            return "None"
+
+        token = node.children[0]
+        key: tuple[object, ...] | None = None
+
+        if token.type == "REF_QUALIFIED":
+            sheet_text, addr_text = _split_qualified_ref(token.value)
+            if sheet_text is None or addr_text is None:
+                key = ("ext", token.value)
+            else:
+                target_sheet_idx = _sheet_idx_from_token(sheet_text, self.sheet_idx_by_name)
+                normalized_addr = _normalize_addr(addr_text)
+                if target_sheet_idx is None:
+                    normalized_sheet = _normalize_sheet_token(sheet_text)
+                    key = ("ext", f"{normalized_sheet}!{normalized_addr}")
+                else:
+                    key = ("ref", target_sheet_idx, normalized_addr)
+
+        elif token.type in {"REF_CELL", "REF_CELL_RANGE", "REF_COL_RANGE", "REF_ROW_RANGE"}:
+            key = ("ref", self.current_sheet_idx, _normalize_addr(token.value))
+
+        if key is None:
+            self.errors.append(f"Unsupported reference token: {token.type}")
+            return "None"
+
+        arg_name = self.dep_arg_by_key.get(key)
+        if arg_name is None:
+            self.errors.append(f"Reference missing from dependency list: {token.value}")
+            return "None"
+        return arg_name
+
+    def _lower_function_call(self, node: Tree) -> str:
+        if not node.children or not isinstance(node.children[0], Token):
+            self.errors.append("Malformed function_call node")
+            return "None"
+
+        function_name = node.children[0].value
+        args: list[str] = []
+
+        if len(node.children) > 1 and isinstance(node.children[1], Tree) and node.children[1].data == "arg_list":
+            args = self._lower_arg_list(node.children[1])
+
+        if args:
+            return f"xl_call({repr(function_name)}, " + ", ".join(args) + ")"
+        return f"xl_call({repr(function_name)})"
+
+    def _lower_arg_list(self, arg_list: Tree) -> list[str]:
+        args: list[str] = []
+        for child in arg_list.children:
+            if isinstance(child, Token) and child.type == "ARG_SEP":
+                continue
+            args.append(self.lower(child))
+        return args
+
+    def _lower_array_row(self, row_node: Tree) -> str:
+        values = [self.lower(child) for child in row_node.children]
+        return "[" + ", ".join(values) + "]"
+
+    def _lower_array_literal(self, node: Tree) -> str:
+        if not node.children:
+            return "[]"
+
+        rows_node = node.children[0]
+        if not isinstance(rows_node, Tree) or rows_node.data != "array_rows":
+            self.errors.append("Malformed array literal")
+            return "[]"
+
+        rows = [self._lower_array_row(child) for child in rows_node.children if isinstance(child, Tree)]
+        if len(rows) == 1:
+            # Keep single-row arrays simple and readable.
+            return rows[0]
+        return "[" + ", ".join(rows) + "]"
+
+    def _lower_binary_chain(self, children: list[Tree | Token], combine) -> str:
+        if not children:
+            self.errors.append("Empty binary chain")
+            return "None"
+
+        left = self.lower(children[0])
+        index = 1
+        while index + 1 < len(children):
+            op_token = children[index]
+            right_node = children[index + 1]
+
+            if not isinstance(op_token, Token):
+                self.errors.append("Malformed binary chain operator")
+                return "None"
+
+            right = self.lower(right_node)
+            left = combine(left, op_token.value, right)
+            index += 2
+
+        if index != len(children):
+            self.errors.append("Malformed binary chain tail")
+
+        return left
+
+
+def _lower_formula_expression(
+    formula: str,
+    current_sheet_idx: int,
+    sheet_idx_by_name: dict[str, int],
+    defined_name_by_upper: dict[str, str],
+    dep_arg_by_key: dict[tuple[object, ...], str],
+) -> tuple[str | None, str | None]:
+    try:
+        tree = parse_formula(formula)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Formula parse failed: {exc}"
+
+    lowerer = _FormulaLowerer(
+        current_sheet_idx=current_sheet_idx,
+        sheet_idx_by_name=sheet_idx_by_name,
+        defined_name_by_upper=defined_name_by_upper,
+        dep_arg_by_key=dep_arg_by_key,
+    )
+    expression = lowerer.lower(tree)
+
+    if lowerer.errors:
+        return None, "; ".join(lowerer.errors)
+
+    return expression, None
+
+
 def _emit_function(
     lines: list[str],
     sheet_names: list[str],
+    sheet_idx_by_name: dict[str, int],
+    defined_name_by_upper: dict[str, str],
     sheet_idx: int,
     addr: str,
     formula: str,
     dependencies: list[list[object]],
-) -> None:
+) -> bool:
     func_name = _cell_func_name(sheet_idx, addr)
     arg_names = [_dep_arg_name(dep, idx) for idx, dep in enumerate(dependencies)]
     args_src = ", ".join(arg_names)
 
+    dep_arg_by_key: dict[tuple[object, ...], str] = {}
+    for idx, dependency in enumerate(dependencies):
+        dep_key = _dependency_key(dependency)
+        if dep_key is not None and dep_key not in dep_arg_by_key:
+            dep_arg_by_key[dep_key] = arg_names[idx]
+
+    lowered_expr, lower_error = _lower_formula_expression(
+        formula=formula,
+        current_sheet_idx=sheet_idx,
+        sheet_idx_by_name=sheet_idx_by_name,
+        defined_name_by_upper=defined_name_by_upper,
+        dep_arg_by_key=dep_arg_by_key,
+    )
+
     lines.append(f"def {func_name}({args_src}) -> object:")
     lines.append(f"    # from {sheet_names[sheet_idx]}!{addr}")
     lines.append(f"    # excel: {formula}")
-    lines.append(
-        f"    raise NotImplementedError(\"Formula lowering not implemented yet for {sheet_names[sheet_idx]}!{addr}\")"
-    )
+
+    if lowered_expr is None:
+        lines.append(f"    raise NotImplementedError({repr(f'Formula lowering failed for {sheet_names[sheet_idx]}!{addr}: {lower_error}')} )")
+        lines.append("")
+        return False
+
+    lines.append(f"    return {lowered_expr}")
     lines.append("")
+    return True
 
 
 def _emit_run_model(
@@ -167,10 +499,14 @@ def emit_literal_skeleton(
         idx: metadata["sheet_dimensions"][sheet_name]
         for idx, sheet_name in enumerate(metadata["sheet_names"])
     }
+    sheet_idx_by_name = {name: idx for idx, name in enumerate(metadata["sheet_names"])}
+    defined_name_by_upper = {
+        item["name"].upper(): item["name"] for item in metadata.get("named_ranges", [])
+    }
 
     output = Path(output_path) if output_path is not None else paths["output_path"]
     lines: list[str] = []
-    lines.append("# Auto-generated deterministic literal skeleton.")
+    lines.append("# Auto-generated deterministic literal Python from planner artifacts.")
     lines.append("# This file is intentionally explicit for later AI refactoring.")
     lines.append("from excel2py.runtime_helpers import *")
     lines.append("")
@@ -181,6 +517,8 @@ def emit_literal_skeleton(
     lines.append("")
 
     emitted_formula_keys: set[tuple[int, str]] = set()
+    lowered_formula_count = 0
+    lowering_failed_count = 0
     for sheet_idx, addr in calc_order:
         key = (sheet_idx, addr)
         emitted_formula_keys.add(key)
@@ -188,14 +526,20 @@ def emit_literal_skeleton(
         if formula is None:
             continue
         dependencies = dependency_map.get(key, [])
-        _emit_function(
+        lowered = _emit_function(
             lines=lines,
             sheet_names=metadata["sheet_names"],
+            sheet_idx_by_name=sheet_idx_by_name,
+            defined_name_by_upper=defined_name_by_upper,
             sheet_idx=sheet_idx,
             addr=addr,
             formula=formula,
             dependencies=dependencies,
         )
+        if lowered:
+            lowered_formula_count += 1
+        else:
+            lowering_failed_count += 1
 
     for cycle in cycle_groups:
         for sheet_idx, addr in cycle:
@@ -207,14 +551,20 @@ def emit_literal_skeleton(
             if formula is None:
                 continue
             dependencies = dependency_map.get(key, [])
-            _emit_function(
+            lowered = _emit_function(
                 lines=lines,
                 sheet_names=metadata["sheet_names"],
+                sheet_idx_by_name=sheet_idx_by_name,
+                defined_name_by_upper=defined_name_by_upper,
                 sheet_idx=sheet_idx,
                 addr=addr,
                 formula=formula,
                 dependencies=dependencies,
             )
+            if lowered:
+                lowered_formula_count += 1
+            else:
+                lowering_failed_count += 1
 
     _emit_run_model(
         lines=lines,
@@ -224,7 +574,7 @@ def emit_literal_skeleton(
     )
 
     lines.append("def main() -> None:")
-    lines.append("    raise SystemExit(\"Generated literal skeleton is not executable until formula lowering is implemented.\")")
+    lines.append("    print('Generated module loaded. Call run_model(inputs) to evaluate.')")
     lines.append("")
     lines.append("if __name__ == \"__main__\":")
     lines.append("    main()")
@@ -237,12 +587,14 @@ def emit_literal_skeleton(
         "formula_function_count": len(emitted_formula_keys),
         "calc_order_count": len(calc_order),
         "cycle_group_count": len(cycle_groups),
+        "lowered_formula_count": lowered_formula_count,
+        "lowering_failed_count": lowering_failed_count,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Emit deterministic literal Python skeleton from planner artifacts."
+        description="Emit deterministic literal Python from planner artifacts."
     )
     parser.add_argument(
         "excel_file",
@@ -278,6 +630,8 @@ def main() -> None:
     print(f"Workbook: {result['workbook_path']}")
     print(f"Output script: {result['output_path']}")
     print(f"Formula functions: {result['formula_function_count']}")
+    print(f"Lowered formulas: {result['lowered_formula_count']}")
+    print(f"Lowering failures: {result['lowering_failed_count']}")
     print(f"Acyclic formulas emitted: {result['calc_order_count']}")
     print(f"Cycle groups: {result['cycle_group_count']}")
 
