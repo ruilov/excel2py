@@ -1,3 +1,9 @@
+import calendar
+import math
+from datetime import date
+from datetime import datetime
+from datetime import timedelta
+
 from openpyxl.utils import cell as xl_cell
 
 
@@ -153,6 +159,45 @@ def _coerce_number(value: object) -> float:
     return float(value)
 
 
+def _try_coerce_number(value: object) -> tuple[float, bool]:
+    try:
+        return _coerce_number(value), True
+    except (TypeError, ValueError):
+        return 0.0, False
+
+
+def xl_add(left: object, right: object) -> float:
+    return _coerce_number(left) + _coerce_number(right)
+
+
+def xl_sub(left: object, right: object) -> float:
+    return _coerce_number(left) - _coerce_number(right)
+
+
+def xl_mul(left: object, right: object) -> float:
+    return _coerce_number(left) * _coerce_number(right)
+
+
+def xl_div(left: object, right: object) -> float:
+    return _coerce_number(left) / _coerce_number(right)
+
+
+def xl_pow(left: object, right: object) -> float:
+    return _coerce_number(left) ** _coerce_number(right)
+
+
+def xl_pos(value: object) -> float:
+    return _coerce_number(value)
+
+
+def xl_neg(value: object) -> float:
+    return -_coerce_number(value)
+
+
+def xl_percent(value: object) -> float:
+    return _coerce_number(value) / 100.0
+
+
 def xl_sum(*args: object) -> float:
     total = 0.0
     for arg in args:
@@ -191,6 +236,200 @@ def xl_round(value: object, digits: object = 0) -> float:
     return round(_coerce_number(value), int(_coerce_number(digits)))
 
 
+def xl_abs(value: object) -> float:
+    return abs(_coerce_number(value))
+
+
+def xl_ceiling(number: object, significance: object = 1) -> float:
+    num = _coerce_number(number)
+    sig = _coerce_number(significance)
+    if sig == 0:
+        return 0.0
+    return math.ceil(num / sig) * sig
+
+
+def xl_choose(index_num: object, *values: object) -> object:
+    index = int(_coerce_number(index_num))
+    if index < 1 or index > len(values):
+        raise ValueError("CHOOSE index out of range")
+    return values[index - 1]
+
+
+def _to_date(value: object) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        # Excel serial date system (Windows 1900 date base).
+        return (date(1899, 12, 30) + timedelta(days=int(value)))
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return datetime.fromisoformat(text).date()
+        except ValueError:
+            return date.fromisoformat(text)
+    raise ValueError(f"Unsupported date value for EOMONTH: {value!r}")
+
+
+def xl_eomonth(start_date: object, months: object) -> str:
+    base = _to_date(start_date)
+    month_offset = int(_coerce_number(months))
+
+    month_index = base.month - 1 + month_offset
+    year = base.year + month_index // 12
+    month = month_index % 12 + 1
+    day = calendar.monthrange(year, month)[1]
+    return datetime(year, month, day).isoformat()
+
+
+def _coerce_criteria_value(text: str) -> object:
+    cleaned = text.strip()
+    if cleaned == "":
+        return ""
+    try:
+        return float(cleaned)
+    except ValueError:
+        return cleaned
+
+
+def _criteria_match(value: object, criteria: object) -> bool:
+    if isinstance(criteria, str):
+        crit = criteria.strip()
+        for op in ("<>", "<=", ">=", "<", ">", "="):
+            if crit.startswith(op):
+                right = _coerce_criteria_value(crit[len(op):])
+                return xl_compare(op, value, right)
+
+        right = _coerce_criteria_value(crit)
+        if isinstance(right, (int, float)) and isinstance(value, (int, float)):
+            return float(value) == float(right)
+        return value == right
+
+    if isinstance(criteria, (int, float)) and isinstance(value, (int, float)):
+        return float(value) == float(criteria)
+    return value == criteria
+
+
+def _to_1d(values: object) -> list[object]:
+    if not isinstance(values, list):
+        return [values]
+    if values and isinstance(values[0], list):
+        flattened = []
+        for row in values:
+            if isinstance(row, list):
+                flattened.extend(row)
+            else:
+                flattened.append(row)
+        return flattened
+    return list(values)
+
+
+def xl_sumif(range_values: object, criteria: object, sum_range: object | None = None) -> float:
+    criteria_values = _to_1d(range_values)
+    target_values = criteria_values if sum_range is None else _to_1d(sum_range)
+    if len(criteria_values) != len(target_values):
+        raise ValueError("SUMIF ranges must have the same length")
+
+    total = 0.0
+    for current, target in zip(criteria_values, target_values):
+        if _criteria_match(current, criteria):
+            total += _coerce_number(target)
+    return total
+
+
+def xl_sumifs(sum_range: object, *criteria_pairs: object) -> float:
+    if len(criteria_pairs) % 2 != 0:
+        raise ValueError("SUMIFS requires criteria_range/criteria pairs")
+
+    target_values = _to_1d(sum_range)
+    criteria_ranges: list[list[object]] = []
+    criteria_values: list[object] = []
+
+    for idx in range(0, len(criteria_pairs), 2):
+        current_range = _to_1d(criteria_pairs[idx])
+        if len(current_range) != len(target_values):
+            raise ValueError("SUMIFS ranges must have the same length")
+        criteria_ranges.append(current_range)
+        criteria_values.append(criteria_pairs[idx + 1])
+
+    total = 0.0
+    for i, target in enumerate(target_values):
+        matches = True
+        for current_range, current_criteria in zip(criteria_ranges, criteria_values):
+            if not _criteria_match(current_range[i], current_criteria):
+                matches = False
+                break
+        if matches:
+            total += _coerce_number(target)
+    return total
+
+
+def _npv(rate: float, cashflows: list[float]) -> float:
+    total = 0.0
+    for idx, value in enumerate(cashflows):
+        total += value / ((1.0 + rate) ** idx)
+    return total
+
+
+def _npv_derivative(rate: float, cashflows: list[float]) -> float:
+    total = 0.0
+    for idx, value in enumerate(cashflows):
+        if idx == 0:
+            continue
+        total -= idx * value / ((1.0 + rate) ** (idx + 1))
+    return total
+
+
+def xl_irr(values: object, guess: object = 0.1, max_iterations: int = 200, tolerance: float = 1e-10) -> float:
+    cashflows = [_coerce_number(v) for v in _to_1d(values)]
+    if not cashflows:
+        raise ValueError("IRR requires at least one cashflow")
+    if not any(v > 0 for v in cashflows) or not any(v < 0 for v in cashflows):
+        raise ValueError("IRR requires both positive and negative cashflows")
+
+    rate = float(guess)
+    if rate <= -0.999999:
+        rate = -0.9
+
+    for _ in range(max_iterations):
+        value = _npv(rate, cashflows)
+        deriv = _npv_derivative(rate, cashflows)
+        if abs(deriv) < 1e-14:
+            break
+        next_rate = rate - value / deriv
+        if next_rate <= -0.999999 or not math.isfinite(next_rate):
+            break
+        if abs(next_rate - rate) <= tolerance:
+            return next_rate
+        rate = next_rate
+
+    low = -0.999999
+    high = 1.0
+    low_value = _npv(low, cashflows)
+    high_value = _npv(high, cashflows)
+    while low_value * high_value > 0 and high < 1e6:
+        high *= 2.0
+        high_value = _npv(high, cashflows)
+
+    if low_value * high_value > 0:
+        raise ValueError("IRR did not converge")
+
+    for _ in range(max_iterations):
+        mid = (low + high) / 2.0
+        mid_value = _npv(mid, cashflows)
+        if abs(mid_value) <= tolerance or abs(high - low) <= tolerance:
+            return mid
+        if low_value * mid_value < 0:
+            high = mid
+            high_value = mid_value
+        else:
+            low = mid
+            low_value = mid_value
+
+    raise ValueError("IRR did not converge")
+
+
 def xl_concat(left: object, right: object) -> str:
     def _to_text(v: object) -> str:
         if v is None:
@@ -203,18 +442,42 @@ def xl_concat(left: object, right: object) -> str:
 
 
 def xl_compare(op: str, left: object, right: object) -> bool:
+    left_num, left_is_num = _try_coerce_number(left)
+    right_num, right_is_num = _try_coerce_number(right)
+
+    if left_is_num and right_is_num:
+        left = left_num
+        right = right_num
+    else:
+        if left is None:
+            left = ""
+        if right is None:
+            right = ""
+
     if op == "=":
         return left == right
     if op == "<>":
         return left != right
     if op == "<":
-        return left < right
+        try:
+            return left < right
+        except TypeError:
+            return str(left) < str(right)
     if op == ">":
-        return left > right
+        try:
+            return left > right
+        except TypeError:
+            return str(left) > str(right)
     if op == "<=":
-        return left <= right
+        try:
+            return left <= right
+        except TypeError:
+            return str(left) <= str(right)
     if op == ">=":
-        return left >= right
+        try:
+            return left >= right
+        except TypeError:
+            return str(left) >= str(right)
     raise ValueError(f"Unsupported comparison operator: {op}")
 
 
@@ -258,10 +521,44 @@ def xl_call(function_name: str, *args: object) -> object:
     upper = function_name.upper()
     if upper == "SUM":
         return xl_sum(*args)
+    if upper == "SUMIF":
+        if len(args) == 2:
+            return xl_sumif(args[0], args[1])
+        if len(args) >= 3:
+            return xl_sumif(args[0], args[1], args[2])
+        raise ValueError("SUMIF requires at least 2 arguments")
+    if upper == "SUMIFS":
+        if len(args) < 3:
+            raise ValueError("SUMIFS requires at least 3 arguments")
+        return xl_sumifs(args[0], *args[1:])
     if upper == "MIN":
         return xl_min(*args)
     if upper == "MAX":
         return xl_max(*args)
+    if upper == "ABS":
+        if not args:
+            raise ValueError("ABS requires 1 argument")
+        return xl_abs(args[0])
+    if upper == "CEILING":
+        if len(args) == 1:
+            return xl_ceiling(args[0], 1)
+        if len(args) >= 2:
+            return xl_ceiling(args[0], args[1])
+        raise ValueError("CEILING requires at least 1 argument")
+    if upper == "CHOOSE":
+        if len(args) < 2:
+            raise ValueError("CHOOSE requires at least 2 arguments")
+        return xl_choose(args[0], *args[1:])
+    if upper == "EOMONTH":
+        if len(args) < 2:
+            raise ValueError("EOMONTH requires 2 arguments")
+        return xl_eomonth(args[0], args[1])
+    if upper == "IRR":
+        if len(args) == 1:
+            return xl_irr(args[0], 0.1)
+        if len(args) >= 2:
+            return xl_irr(args[0], args[1])
+        raise ValueError("IRR requires at least 1 argument")
     if upper == "IF":
         if len(args) == 2:
             return xl_if(args[0], args[1], False)

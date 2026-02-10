@@ -151,33 +151,39 @@ class _FormulaLowerer:
         if data == "additive_expr":
             return self._lower_binary_chain(
                 node.children,
-                combine=lambda left, op, right: f"({left} {op} {right})",
+                combine=lambda left, op, right: f"xl_add({left}, {right})"
+                if op == "+"
+                else f"xl_sub({left}, {right})",
             )
 
         if data == "multiplicative_expr":
             return self._lower_binary_chain(
                 node.children,
-                combine=lambda left, op, right: f"({left} {op} {right})",
+                combine=lambda left, op, right: f"xl_mul({left}, {right})"
+                if op == "*"
+                else f"xl_div({left}, {right})",
             )
 
         if data == "power_expr":
             return self._lower_binary_chain(
                 node.children,
-                combine=lambda left, op, right: f"({left} ** {right})",
+                combine=lambda left, op, right: f"xl_pow({left}, {right})",
             )
 
         if data == "unary_expr":
             if len(node.children) == 2 and isinstance(node.children[0], Token):
                 op = node.children[0].value
                 inner = self.lower(node.children[1])
-                return f"({op}{inner})"
+                if op == "+":
+                    return f"xl_pos({inner})"
+                return f"xl_neg({inner})"
             if len(node.children) == 1:
                 return self.lower(node.children[0])
 
         if data == "postfix_expr":
             if len(node.children) == 2:
                 value = self.lower(node.children[0])
-                return f"({value} / 100.0)"
+                return f"xl_percent({value})"
             if len(node.children) == 1:
                 return self.lower(node.children[0])
 
